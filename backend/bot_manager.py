@@ -40,8 +40,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DISPLAY_BASE = 99
 VNC_PORT_BASE = 5900
-SCREEN_WIDTH = 1366
-SCREEN_HEIGHT = 768
+SCREEN_WIDTH = 1280
+SCREEN_HEIGHT = 720
 SCREEN_GEOMETRY = f"{SCREEN_WIDTH}x{SCREEN_HEIGHT}x24"
 
 
@@ -213,7 +213,11 @@ class BotInstance:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            await asyncio.sleep(1.2)
+            # Wait for Xvfb to be ready instead of blind sleep
+            for _ in range(20):
+                if Path(f"/tmp/.X{self.display_num}-lock").exists():
+                    break
+                await asyncio.sleep(0.1)
 
             self.vnc_proc = subprocess.Popen(
                 [
@@ -234,7 +238,14 @@ class BotInstance:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            await asyncio.sleep(0.8)
+            # Wait for x11vnc to bind its port instead of blind sleep
+            for _ in range(30):
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.connect(("127.0.0.1", self.vnc_port))
+                    break
+                except OSError:
+                    await asyncio.sleep(0.1)
             env["DISPLAY"] = f":{self.display_num}"
         else:
             self.vnc_available = False
@@ -251,9 +262,17 @@ class BotInstance:
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--disable-extensions",
+            "--disable-component-extensions-with-background-pages",
+            "--disable-default-apps",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-sync",
+            "--disable-translate",
             "--window-position=0,0",
             f"--window-size={SCREEN_WIDTH},{SCREEN_HEIGHT}",
-            "--start-maximized",
         ]
 
         self.browser_context = await self._launch_browser_context(launch_args, env)
