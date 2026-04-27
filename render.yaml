@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: free4talk-bot
+    runtime: docker
+    plan: free
+    envVars:
+      - key: BOT_DATA_DIR
+        value: /data
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: 8080
+    healthCheckPath: /healthz
+    # Render pings /healthz automatically every ~30s
+    # But we ALSO need external pings to prevent sleep
