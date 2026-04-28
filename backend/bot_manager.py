@@ -431,27 +431,30 @@ class BotInstance:
 
                 clicked_start = False
                 try:
-                    clicked_start = await self.page.evaluate("""() => {
-                            const nodes = document.querySelectorAll('body *');
-                            for (const n of nodes) {
-                                const t = (n.textContent || '').trim().toLowerCase();
-                                if (t === 'click on anywhere to start' ||
-                                    t === 'click anywhere to start') {
-                                    const rect = n.getBoundingClientRect();
-                                    if (rect.width > 0) {
-                                        const ev = new MouseEvent('click', {
-                                            bubbles:true,
-                                            cancelable:true,
-                                            view:window,
-                                        });
-                                        (n.closest('div') || n).dispatchEvent(ev);
-                                        document.body.click();
-                                        return true;
-                                    }
+                    # Use Playwright's real mouse click, not synthetic JS dispatchEvent
+                    overlay_info = await self.page.evaluate("""() => {
+                        const nodes = document.querySelectorAll('body *');
+                        for (const n of nodes) {
+                            const t = (n.textContent || '').trim().toLowerCase();
+                            if (t === 'click on anywhere to start' ||
+                                t === 'click anywhere to start') {
+                                const rect = n.getBoundingClientRect();
+                                if (rect.width > 0) {
+                                    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
                                 }
                             }
-                            return false;
-                        }""")
+                        }
+                        return null;
+                    }""")
+                    if overlay_info:
+                        # Real mouse click — triggers pointer events that JS dispatchEvent can't
+                        await self.page.mouse.click(overlay_info["x"], overlay_info["y"])
+                        clicked_start = True
+                        logger.info("[%s] real mouse click on start overlay at (%s, %s)",
+                                    self.bot_id[:8], overlay_info["x"], overlay_info["y"])
+                    else:
+                        # Fallback: click center of page in case overlay detection missed it
+                        await self.page.mouse.click(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2)
                 except Exception:
                     clicked_start = False
 
