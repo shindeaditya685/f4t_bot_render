@@ -216,6 +216,33 @@ class BotInstance:
         except Exception as e:
             logger.warning("[%s] stealth patch failed: %s", self.bot_id[:8], e)
 
+    async def _dismiss_infobar(self) -> None:
+        """Click close on Chromium infobar warnings (e.g., --no-sandbox)."""
+        try:
+            dismissed = await self.page.evaluate("""() => {
+                const selectors = [
+                    '#infobar', '.infobar', '[role="alert"]',
+                    'div[id*="infobar"]', 'div[class*="infobar"]',
+                    '#overlay', 'div[class*="banner"]'
+                ];
+                for (const sel of selectors) {
+                    const bar = document.querySelector(sel);
+                    if (bar) {
+                        const btn = bar.querySelector(
+                            'button, [class*="close"], [aria-label*="close"], [id*="close"]'
+                        );
+                        if (btn) { btn.click(); }
+                        bar.style.display = 'none';
+                        return true;
+                    }
+                }
+                return false;
+            }""")
+            if dismissed:
+                logger.info("[%s] dismissed Chromium infobar", self.bot_id[:8])
+        except Exception:
+            pass
+
     async def _launch_browser_context(
         self, launch_args: list[str], env: dict[str, str]
     ) -> BrowserContext:
@@ -361,7 +388,28 @@ class BotInstance:
         else:
             self.page = await self.browser_context.new_page()
 
+        # Auto-dismiss Chromium infobars (e.g., --no-sandbox warning)
+        try:
+            await self.page.goto("about:blank")
+            await self.page.evaluate("""() => {
+                // Accept the --no-sandbox warning so it never shows again
+                if (window.localStorage) {
+                    try {
+                        const key = 'devtools-preferences';
+                        const prefs = JSON.parse(window.localStorage.getItem(key) || '{}');
+                        prefs.infobar_dismissed = true;
+                        window.localStorage.setItem(key, JSON.stringify(prefs));
+                    } catch(e) {}
+                }
+            }""")
+        except Exception as e:
+            logger.warning("infobar setup failed: %s", e)
+
         await self.page.goto(self.room_url, wait_until="domcontentloaded")
+
+        # Dismiss any Chromium warning banners on the page
+        await self._dismiss_infobar()
+
         self.running = True
         self.set_status("waiting_login", self.login_instructions())
 
@@ -373,6 +421,9 @@ class BotInstance:
                 await asyncio.sleep(5)
                 if not self.page or self.page.is_closed():
                     break
+
+                # Keep dismissing infobar warnings on every loop iteration
+                await self._dismiss_infobar()
 
                 url = self.page.url
                 on_google = "accounts.google.com" in url
