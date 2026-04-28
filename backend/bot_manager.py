@@ -150,6 +150,72 @@ class BotInstance:
             return "Sign in with Google via VNC"
         return "Sign in with Google in the local browser window"
 
+    async def _apply_stealth_patches(self) -> None:
+        """Inject JS to hide Playwright automation signals from Google."""
+        stealth_js = """
+        // Hide webdriver flag
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined,
+            configurable: true,
+        });
+
+        // Override plugins to look like a real browser
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => {
+                const plugins = [
+                    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                    { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+                ];
+                plugins.length = 3;
+                return plugins;
+            },
+            configurable: true,
+        });
+
+        // Override languages
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en'],
+            configurable: true,
+        });
+
+        // Override platform
+        Object.defineProperty(navigator, 'platform', {
+            get: () => 'Linux x86_64',
+            configurable: true,
+        });
+
+        // Fix chrome runtime
+        window.chrome = window.chrome || {};
+        window.chrome.runtime = window.chrome.runtime || {};
+        window.chrome.csi = window.chrome.csi || function() {};
+        window.chrome.loadTimes = window.chrome.loadTimes || function() {};
+
+        // Override permissions query
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) =>
+            parameters.name === 'notifications'
+                ? Promise.resolve({ state: Notification.permission })
+                : originalQuery(parameters);
+
+        // Remove Playwright-specific globals
+        delete window.__playwright_evaluation_script__;
+        delete window.__pw_manual;
+
+        // WebGL vendor/renderer
+        const getParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(parameter) {
+            if (parameter === 37445) return 'Intel Inc.';
+            if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+            return getParameter.call(this, parameter);
+        };
+        """
+        try:
+            await self.browser_context.add_init_script(stealth_js)
+            logger.info("[%s] stealth patches applied", self.bot_id[:8])
+        except Exception as e:
+            logger.warning("[%s] stealth patch failed: %s", self.bot_id[:8], e)
+
     async def _launch_browser_context(
         self, launch_args: list[str], env: dict[str, str]
     ) -> BrowserContext:
@@ -162,8 +228,9 @@ class BotInstance:
             "ignore_default_args": ["--enable-automation"],
             "user_agent": (
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
             ),
+            "color_scheme": "dark",
         }
 
         channels = [None]
@@ -271,11 +338,16 @@ class BotInstance:
             "--no-default-browser-check",
             "--disable-sync",
             "--disable-translate",
+            "--disable-features=AutomationControlled",
+            "--exclude-switches=enable-automation",
             "--window-position=0,0",
             f"--window-size={SCREEN_WIDTH},{SCREEN_HEIGHT}",
         ]
 
         self.browser_context = await self._launch_browser_context(launch_args, env)
+
+        # Apply stealth patches to avoid Google "not secure" detection
+        await self._apply_stealth_patches()
 
         try:
             await self.browser_context.grant_permissions(
