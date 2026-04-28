@@ -40,9 +40,68 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DISPLAY_BASE = 99
 VNC_PORT_BASE = 5900
-SCREEN_WIDTH = 1280
-SCREEN_HEIGHT = 720
+SCREEN_WIDTH = 1366
+SCREEN_HEIGHT = 768
 SCREEN_GEOMETRY = f"{SCREEN_WIDTH}x{SCREEN_HEIGHT}x24"
+
+# Script injected into every page to mask Playwright/automation fingerprints.
+# This is the primary fix for Google's "This browser or app may not be secure" block.
+_STEALTH_SCRIPT = """
+(() => {
+    // Hide webdriver flag
+    Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+        configurable: true,
+    });
+
+    // Spoof plugins so the browser doesn't look headless
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => {
+            const arr = [
+                { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+            ];
+            arr.__proto__ = PluginArray.prototype;
+            return arr;
+        },
+        configurable: true,
+    });
+
+    // Spoof languages
+    Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+        configurable: true,
+    });
+
+    // Add window.chrome so Google's checks pass
+    if (!window.chrome) {
+        window.chrome = {
+            app: { isInstalled: false, InstallState: {}, RunningState: {} },
+            runtime: {
+                OnInstalledReason: {},
+                OnRestartRequiredReason: {},
+                PlatformArch: {},
+                PlatformNaclArch: {},
+                PlatformOs: {},
+                RequestUpdateCheckStatus: {},
+            },
+            loadTimes: function() {},
+            csi: function() {},
+        };
+    }
+
+    // Mask automation-related properties
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) =>
+        parameters.name === 'notifications'
+            ? Promise.resolve({ state: Notification.permission })
+            : originalQuery(parameters);
+
+    // Prevent detection via toString checks
+    window.navigator.permissions.query.toString = originalQuery.toString.bind(originalQuery);
+})();
+"""
 
 
 def _supports_managed_vnc() -> bool:
@@ -150,99 +209,6 @@ class BotInstance:
             return "Sign in with Google via VNC"
         return "Sign in with Google in the local browser window"
 
-    async def _apply_stealth_patches(self) -> None:
-        """Inject JS to hide Playwright automation signals from Google."""
-        stealth_js = """
-        // Hide webdriver flag
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined,
-            configurable: true,
-        });
-
-        // Override plugins to look like a real browser
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => {
-                const plugins = [
-                    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-                    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-                    { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
-                ];
-                plugins.length = 3;
-                return plugins;
-            },
-            configurable: true,
-        });
-
-        // Override languages
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-US', 'en'],
-            configurable: true,
-        });
-
-        // Override platform
-        Object.defineProperty(navigator, 'platform', {
-            get: () => 'Linux x86_64',
-            configurable: true,
-        });
-
-        // Fix chrome runtime
-        window.chrome = window.chrome || {};
-        window.chrome.runtime = window.chrome.runtime || {};
-        window.chrome.csi = window.chrome.csi || function() {};
-        window.chrome.loadTimes = window.chrome.loadTimes || function() {};
-
-        // Override permissions query
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) =>
-            parameters.name === 'notifications'
-                ? Promise.resolve({ state: Notification.permission })
-                : originalQuery(parameters);
-
-        // Remove Playwright-specific globals
-        delete window.__playwright_evaluation_script__;
-        delete window.__pw_manual;
-
-        // WebGL vendor/renderer
-        const getParameter = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(parameter) {
-            if (parameter === 37445) return 'Intel Inc.';
-            if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-            return getParameter.call(this, parameter);
-        };
-        """
-        try:
-            await self.browser_context.add_init_script(stealth_js)
-            logger.info("[%s] stealth patches applied", self.bot_id[:8])
-        except Exception as e:
-            logger.warning("[%s] stealth patch failed: %s", self.bot_id[:8], e)
-
-    async def _dismiss_infobar(self) -> None:
-        """Click close on Chromium infobar warnings (e.g., --no-sandbox)."""
-        try:
-            dismissed = await self.page.evaluate("""() => {
-                const selectors = [
-                    '#infobar', '.infobar', '[role="alert"]',
-                    'div[id*="infobar"]', 'div[class*="infobar"]',
-                    '#overlay', 'div[class*="banner"]'
-                ];
-                for (const sel of selectors) {
-                    const bar = document.querySelector(sel);
-                    if (bar) {
-                        const btn = bar.querySelector(
-                            'button, [class*="close"], [aria-label*="close"], [id*="close"]'
-                        );
-                        if (btn) { btn.click(); }
-                        bar.style.display = 'none';
-                        return true;
-                    }
-                }
-                return false;
-            }""")
-            if dismissed:
-                logger.info("[%s] dismissed Chromium infobar", self.bot_id[:8])
-        except Exception:
-            pass
-
     async def _launch_browser_context(
         self, launch_args: list[str], env: dict[str, str]
     ) -> BrowserContext:
@@ -252,17 +218,23 @@ class BotInstance:
             "viewport": {"width": SCREEN_WIDTH, "height": SCREEN_HEIGHT},
             "args": launch_args,
             "env": env,
-            "ignore_default_args": ["--enable-automation"],
+            # Critical: remove --enable-automation which triggers Google's security warning
+            "ignore_default_args": ["--enable-automation", "--enable-blink-features=IdleDetection"],
             "user_agent": (
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             ),
-            "color_scheme": "dark",
         }
 
-        channels = [None]
+        # FIX: Prefer real installed Chrome/Chromium over Playwright's bundled Chromium.
+        # Google blocks OAuth sign-in on Playwright's bundled Chromium because it
+        # lacks certain browser capabilities that real Chrome has.
+        # Order matters: try the most "real" browser first.
         if WINDOWS:
-            channels.extend(["msedge", "chrome"])
+            channels = ["chrome", "msedge", None]
+        else:
+            # On Linux: "chromium" = system-installed Chromium (apt), None = Playwright bundled
+            channels = ["chrome", "chromium", None]
 
         last_error: Exception | None = None
         for channel in channels:
@@ -270,19 +242,24 @@ class BotInstance:
                 options = dict(launch_options)
                 if channel:
                     options["channel"] = channel
-                return await self.playwright_ctx.chromium.launch_persistent_context(
+                ctx = await self.playwright_ctx.chromium.launch_persistent_context(
                     **options
                 )
+                logger.info("Launched browser with channel=%s", channel or "playwright-bundled")
+                return ctx
             except PlaywrightError as exc:
                 last_error = exc
                 message = str(exc)
-                if not WINDOWS or "Executable doesn't exist" not in message:
-                    raise
-                logger.warning("playwright launch failed for channel %s: %s", channel, exc)
+                # Only continue trying other channels for "not found" errors
+                if "Executable doesn't exist" in message or "not found" in message.lower():
+                    logger.warning("Channel %s not available, trying next: %s", channel, exc)
+                    continue
+                # Any other Playwright error is unexpected — re-raise immediately
+                raise
 
         if last_error is not None:
             raise last_error
-        raise RuntimeError("Failed to launch browser context")
+        raise RuntimeError("Failed to launch browser context with any available channel")
 
     async def start(self) -> None:
         self.stop_requested = False
@@ -307,11 +284,7 @@ class BotInstance:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            # Wait for Xvfb to be ready instead of blind sleep
-            for _ in range(20):
-                if Path(f"/tmp/.X{self.display_num}-lock").exists():
-                    break
-                await asyncio.sleep(0.1)
+            await asyncio.sleep(1.2)
 
             self.vnc_proc = subprocess.Popen(
                 [
@@ -332,14 +305,7 @@ class BotInstance:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            # Wait for x11vnc to bind its port instead of blind sleep
-            for _ in range(30):
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                        s.connect(("127.0.0.1", self.vnc_port))
-                    break
-                except OSError:
-                    await asyncio.sleep(0.1)
+            await asyncio.sleep(0.8)
             env["DISPLAY"] = f":{self.display_num}"
         else:
             self.vnc_available = False
@@ -347,34 +313,38 @@ class BotInstance:
 
         self.set_status("starting", "Launching browser")
         self.playwright_ctx = await async_playwright().start()
+
         launch_args = [
             "--no-sandbox",
             "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled",
             "--use-fake-ui-for-media-stream",
             "--mute-audio",
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
-            "--disable-gpu",
-            "--disable-software-rasterizer",
-            "--disable-extensions",
-            "--disable-component-extensions-with-background-pages",
-            "--disable-default-apps",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-sync",
-            "--disable-translate",
-            "--disable-features=AutomationControlled",
-            "--exclude-switches=enable-automation",
             "--window-position=0,0",
             f"--window-size={SCREEN_WIDTH},{SCREEN_HEIGHT}",
+            "--start-maximized",
+            # --- Stealth / anti-detection flags ---
+            # These are the core fix for "This browser or app may not be secure"
+            "--disable-blink-features=AutomationControlled",
+            "--exclude-switches=enable-automation",
+            "--disable-infobars",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--password-store=basic",
+            "--use-mock-keychain",
+            # Needed for Google OAuth in embedded contexts
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-site-isolation-trials",
         ]
 
         self.browser_context = await self._launch_browser_context(launch_args, env)
 
-        # Apply stealth patches to avoid Google "not secure" detection
-        await self._apply_stealth_patches()
+        # FIX: Inject stealth script into every page/frame before any JS runs.
+        # This masks navigator.webdriver, adds window.chrome, spoofs plugins, etc.
+        # Without this, Google detects Playwright and blocks sign-in.
+        await self.browser_context.add_init_script(_STEALTH_SCRIPT)
 
         try:
             await self.browser_context.grant_permissions(
@@ -388,28 +358,7 @@ class BotInstance:
         else:
             self.page = await self.browser_context.new_page()
 
-        # Auto-dismiss Chromium infobars (e.g., --no-sandbox warning)
-        try:
-            await self.page.goto("about:blank")
-            await self.page.evaluate("""() => {
-                // Accept the --no-sandbox warning so it never shows again
-                if (window.localStorage) {
-                    try {
-                        const key = 'devtools-preferences';
-                        const prefs = JSON.parse(window.localStorage.getItem(key) || '{}');
-                        prefs.infobar_dismissed = true;
-                        window.localStorage.setItem(key, JSON.stringify(prefs));
-                    } catch(e) {}
-                }
-            }""")
-        except Exception as e:
-            logger.warning("infobar setup failed: %s", e)
-
         await self.page.goto(self.room_url, wait_until="domcontentloaded")
-
-        # Dismiss any Chromium warning banners on the page
-        await self._dismiss_infobar()
-
         self.running = True
         self.set_status("waiting_login", self.login_instructions())
 
@@ -422,39 +371,33 @@ class BotInstance:
                 if not self.page or self.page.is_closed():
                     break
 
-                # Keep dismissing infobar warnings on every loop iteration
-                await self._dismiss_infobar()
-
                 url = self.page.url
                 on_google = "accounts.google.com" in url
                 on_f4t = "free4talk.com" in url
 
                 clicked_start = False
                 try:
-                    # Use Playwright's real mouse click, not synthetic JS dispatchEvent
-                    overlay_info = await self.page.evaluate("""() => {
-                        const nodes = document.querySelectorAll('body *');
-                        for (const n of nodes) {
-                            const t = (n.textContent || '').trim().toLowerCase();
-                            if (t === 'click on anywhere to start' ||
-                                t === 'click anywhere to start') {
-                                const rect = n.getBoundingClientRect();
-                                if (rect.width > 0) {
-                                    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+                    clicked_start = await self.page.evaluate("""() => {
+                            const nodes = document.querySelectorAll('body *');
+                            for (const n of nodes) {
+                                const t = (n.textContent || '').trim().toLowerCase();
+                                if (t === 'click on anywhere to start' ||
+                                    t === 'click anywhere to start') {
+                                    const rect = n.getBoundingClientRect();
+                                    if (rect.width > 0) {
+                                        const ev = new MouseEvent('click', {
+                                            bubbles:true,
+                                            cancelable:true,
+                                            view:window,
+                                        });
+                                        (n.closest('div') || n).dispatchEvent(ev);
+                                        document.body.click();
+                                        return true;
+                                    }
                                 }
                             }
-                        }
-                        return null;
-                    }""")
-                    if overlay_info:
-                        # Real mouse click — triggers pointer events that JS dispatchEvent can't
-                        await self.page.mouse.click(overlay_info["x"], overlay_info["y"])
-                        clicked_start = True
-                        logger.info("[%s] real mouse click on start overlay at (%s, %s)",
-                                    self.bot_id[:8], overlay_info["x"], overlay_info["y"])
-                    else:
-                        # Fallback: click center of page in case overlay detection missed it
-                        await self.page.mouse.click(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2)
+                            return false;
+                        }""")
                 except Exception:
                     clicked_start = False
 

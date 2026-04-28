@@ -28,6 +28,7 @@ RUN apt-get update && \
     xvfb \
     x11vnc \
     novnc \
+    chromium-browser \
     websockify && \
     ln -fs /usr/share/zoneinfo/$TZ /etc/localtime && \
     echo $TZ > /etc/timezone && \
