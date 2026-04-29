@@ -40,8 +40,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DISPLAY_BASE = 99
 VNC_PORT_BASE = 5900
-SCREEN_WIDTH = 1366
-SCREEN_HEIGHT = 768
+SCREEN_WIDTH = int(os.environ.get("BOT_SCREEN_WIDTH", "1366"))
+SCREEN_HEIGHT = int(os.environ.get("BOT_SCREEN_HEIGHT", "900"))
 SCREEN_GEOMETRY = f"{SCREEN_WIDTH}x{SCREEN_HEIGHT}x24"
 
 # Script injected into every page to mask Playwright/automation fingerprints.
@@ -178,6 +178,8 @@ class BotInstance:
     logged_in: bool = False
     vnc_available: bool = False
     fullscreen_applied: bool = False
+    page_crashed: bool = False
+    recovery_count: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def set_status(self, status: str, message: str = "") -> None:
@@ -208,6 +210,17 @@ class BotInstance:
         if self.vnc_available:
             return "Sign in with Google via VNC"
         return "Sign in with Google in the local browser window"
+
+    def _install_page_handlers(self, page: Page) -> None:
+        def mark_crashed(_page: Page | None = None) -> None:
+            if not self.stop_requested:
+                self.page_crashed = True
+                self.set_status(
+                    "disconnected",
+                    "Browser tab crashed - recovering",
+                )
+
+        page.on("crash", mark_crashed)
 
     async def _launch_browser_context(
         self, launch_args: list[str], env: dict[str, str]
@@ -330,6 +343,7 @@ class BotInstance:
             "--disable-blink-features=AutomationControlled",
             "--exclude-switches=enable-automation",
             "--disable-infobars",
+            "--test-type",
             "--no-first-run",
             "--no-default-browser-check",
             "--password-store=basic",
@@ -358,18 +372,49 @@ class BotInstance:
         else:
             self.page = await self.browser_context.new_page()
 
+        self._install_page_handlers(self.page)
         await self.page.goto(self.room_url, wait_until="domcontentloaded")
         self.running = True
         self.set_status("waiting_login", self.login_instructions())
 
         self.monitor_task = asyncio.create_task(self._monitor_loop())
 
+    async def _recover_page(self, reason: str) -> None:
+        if self.stop_requested or not self.running:
+            return
+
+        if not self.browser_context:
+            raise RuntimeError("Cannot recover page because browser context is closed")
+
+        self.recovery_count += 1
+        self.page_crashed = False
+        self.fullscreen_applied = False
+        self.in_room = False
+        self.set_status("disconnected", f"{reason} - reopening room")
+
+        old_page = self.page
+        self.page = None
+        if old_page and not old_page.is_closed():
+            try:
+                await old_page.close(run_before_unload=False)
+            except Exception:
+                pass
+
+        self.page = await self.browser_context.new_page()
+        self._install_page_handlers(self.page)
+        await self.page.goto(self.room_url, wait_until="domcontentloaded")
+        self.set_status("joining", "Recovered browser tab, rejoining room")
+
     async def _monitor_loop(self) -> None:
         while self.running and not self.stop_requested:
             try:
                 await asyncio.sleep(5)
+                if self.page_crashed:
+                    await self._recover_page("Browser renderer crashed")
+                    continue
                 if not self.page or self.page.is_closed():
-                    break
+                    await self._recover_page("Browser tab closed")
+                    continue
 
                 url = self.page.url
                 on_google = "accounts.google.com" in url
@@ -452,6 +497,19 @@ class BotInstance:
             except Exception as e:
                 logger.exception(f"monitor loop error: {e}")
                 self.set_status("error", str(e)[:200])
+                if not self.stop_requested:
+                    message = str(e).lower()
+                    if (
+                        "crash" in message
+                        or "target page" in message
+                        or "target closed" in message
+                    ):
+                        try:
+                            await self._recover_page("Browser became unavailable")
+                        except Exception as recover_error:
+                            logger.exception(
+                                "page recovery failed: %s", recover_error
+                            )
                 await asyncio.sleep(5)
 
         logger.info(f"[{self.bot_id[:8]}] monitor loop exited")

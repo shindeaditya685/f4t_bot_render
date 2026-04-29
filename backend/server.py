@@ -32,6 +32,7 @@ from starlette.middleware.cors import CORSMiddleware
 from bot_manager import DATA_DIR, bot_manager
 from models import Bot, BotCreate, BotRuntimeInfo, BotStatus, BotUpdate, now_iso
 from store import create_bot_store
+from telegram_bot import create_telegram_control_bot
 
 
 # Add to server.py - background keep-alive task
@@ -65,6 +66,9 @@ logger = logging.getLogger("server")
 FRONTEND_DIST_DIR = ROOT_DIR.parent / "frontend" / "dist"
 FRONTEND_INDEX_FILE = FRONTEND_DIST_DIR / "index.html"
 bot_store, store_mode = create_bot_store(DATA_DIR.parent / "bots.json")
+telegram_control_bot = None
+telegram_task: asyncio.Task | None = None
+keepalive_task: asyncio.Task | None = None
 
 
 def _first_env(*names: str) -> str:
@@ -250,6 +254,8 @@ async def _save_bot(bot: Bot) -> None:
 
 
 async def _startup() -> None:
+    global keepalive_task, telegram_control_bot, telegram_task
+
     logger.info("Server starting - bot store %s", store_mode)
     if AUTH_ENABLED:
         logger.info("Dashboard auth enabled for user %s", AUTH_USERNAME)
@@ -270,9 +276,46 @@ async def _startup() -> None:
     except Exception as exc:
         logger.exception("auto-start scan failed: %s", exc)
 
+    if KEEPALIVE_URL and keepalive_task is None:
+        keepalive_task = asyncio.create_task(_keepalive_loop())
+
+    telegram_control_bot = create_telegram_control_bot(bot_store)
+    if telegram_control_bot is not None and telegram_task is None:
+        telegram_task = asyncio.create_task(telegram_control_bot.run())
+        logger.info("Telegram control bot enabled")
+    else:
+        logger.info("Telegram control bot disabled")
+
 
 async def _shutdown() -> None:
+    global keepalive_task, telegram_task
+
     logger.info("Server shutting down - stopping bots")
+
+    if telegram_control_bot is not None:
+        telegram_control_bot.stop()
+    if telegram_task is not None:
+        telegram_task.cancel()
+        try:
+            await telegram_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Telegram bot shutdown failed")
+        finally:
+            telegram_task = None
+
+    if keepalive_task is not None:
+        keepalive_task.cancel()
+        try:
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Keepalive shutdown failed")
+        finally:
+            keepalive_task = None
+
     for bot_id in list(bot_manager.instances.keys()):
         try:
             await bot_manager.stop_bot(bot_id)

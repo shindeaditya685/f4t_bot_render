@@ -26,6 +26,51 @@ python server.py
 
 If `MONGO_URL` is empty, the backend stores bot metadata in `backend/data/bots.json` on Windows or `/data/bots.json` on Linux.
 
+### Telegram control bot
+
+The backend can also run a Telegram bot that controls the same rooms as the web dashboard.
+
+Set these variables in `backend/.env` locally, or in your host's service variables:
+
+```env
+TELEGRAM_BOT_TOKEN=your-telegram-bot-token
+TELEGRAM_ALLOWED_CHAT_IDS=
+PUBLIC_BASE_URL=https://your-deployed-app.example.com
+```
+
+- `TELEGRAM_BOT_TOKEN` enables the bot.
+- `TELEGRAM_ALLOWED_CHAT_IDS` is optional but recommended. Put one or more chat IDs separated by commas.
+- `PUBLIC_BASE_URL` is needed only for `/viewer` links.
+
+Commands:
+
+```text
+/bots
+/new nickname | https://www.free4talk.com/room/...
+/startbot ID
+/stopbot ID
+/status ID
+/viewer ID
+/deletebot ID
+```
+
+You can use either the full bot ID or the short first part shown by `/bots`.
+
+### Chromium crash recovery
+
+If Chromium shows "Aw, Snap!" or the renderer crashes, the monitor now marks the bot as disconnected, recreates the tab, and navigates back to the configured room URL. This is meant to prevent the room from expiring while the bot is stuck on Chrome's crash screen.
+
+### Viewer size
+
+The bot uses a 1366x900 virtual display by default so the bottom of Free4Talk is visible inside the noVNC viewer. You can tune it with:
+
+```env
+BOT_SCREEN_WIDTH=1366
+BOT_SCREEN_HEIGHT=900
+```
+
+After changing these values, stop and start the bot again so Chromium and Xvfb relaunch with the new size.
+
 ### Frontend
 
 1. Create `frontend/.env` from `frontend/.env.example` if you want to override the backend URL in Vite dev.
