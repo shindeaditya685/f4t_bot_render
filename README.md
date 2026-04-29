@@ -71,6 +71,25 @@ BOT_SCREEN_HEIGHT=900
 
 After changing these values, stop and start the bot again so Chromium and Xvfb relaunch with the new size.
 
+### Render Free survival mode
+
+Render Free can work only as a fragile free setup. Use one bot per service and keep the browser small:
+
+```env
+BOT_LOW_MEMORY_MODE=true
+BOT_SCREEN_WIDTH=1024
+BOT_SCREEN_HEIGHT=700
+BOT_DATA_DIR=/data
+```
+
+Keep your cron pinger hitting:
+
+```text
+https://your-app.onrender.com/healthz
+```
+
+every 5 to 10 minutes. This prevents normal idle sleep, but it does not add a persistent disk to Render Free. If Render restarts, redeploys, or moves the service, the Google browser session can still be lost and you may need to sign in again. That is a platform limit, not an app bug.
+
 ### Frontend
 
 1. Create `frontend/.env` from `frontend/.env.example` if you want to override the backend URL in Vite dev.
@@ -119,6 +138,16 @@ HOST=0.0.0.0
 - If Railway puts your account on a Limited Trial, Google login automation will probably fail because outbound access is restricted. In that case, connect GitHub and let Railway verify the account first.
 - If the `0.5GB` trial/free volume is too small for Chromium profiles, you may need to upgrade or prune unused bot profiles.
 - For this app, mount the volume at `/data` and keep browser/session state there. That is what the container is already configured for.
+- Railway does not deploy your local `backend/.env` file. Add Telegram settings in the Railway service's Variables tab:
+
+```env
+TELEGRAM_BOT_TOKEN=your-telegram-bot-token
+TELEGRAM_ALLOWED_CHAT_IDS=your-chat-id
+PUBLIC_BASE_URL=https://your-app.up.railway.app
+```
+
+- After deploy, open `https://your-app.up.railway.app/healthz`. It should include `"telegram":{"enabled":true,"running":true,...}`.
+- If logs show a Telegram polling/webhook conflict, redeploy with the latest code. Startup clears any old Telegram webhook before long polling begins.
 
 ## Production / Fly.io
 

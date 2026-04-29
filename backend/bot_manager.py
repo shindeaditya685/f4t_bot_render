@@ -40,8 +40,16 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DISPLAY_BASE = 99
 VNC_PORT_BASE = 5900
-SCREEN_WIDTH = int(os.environ.get("BOT_SCREEN_WIDTH", "1366"))
-SCREEN_HEIGHT = int(os.environ.get("BOT_SCREEN_HEIGHT", "900"))
+LOW_MEMORY_MODE = os.environ.get("BOT_LOW_MEMORY_MODE", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+DEFAULT_SCREEN_WIDTH = "1024" if LOW_MEMORY_MODE else "1366"
+DEFAULT_SCREEN_HEIGHT = "700" if LOW_MEMORY_MODE else "900"
+SCREEN_WIDTH = int(os.environ.get("BOT_SCREEN_WIDTH", DEFAULT_SCREEN_WIDTH))
+SCREEN_HEIGHT = int(os.environ.get("BOT_SCREEN_HEIGHT", DEFAULT_SCREEN_HEIGHT))
 SCREEN_GEOMETRY = f"{SCREEN_WIDTH}x{SCREEN_HEIGHT}x24"
 
 # Script injected into every page to mask Playwright/automation fingerprints.
@@ -330,6 +338,15 @@ class BotInstance:
         launch_args = [
             "--no-sandbox",
             "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--disable-sync",
+            "--disable-default-apps",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-client-side-phishing-detection",
+            "--disable-popup-blocking",
+            "--metrics-recording-only",
             "--use-fake-ui-for-media-stream",
             "--mute-audio",
             "--disable-background-timer-throttling",
@@ -352,6 +369,14 @@ class BotInstance:
             "--disable-features=IsolateOrigins,site-per-process",
             "--disable-site-isolation-trials",
         ]
+
+        if LOW_MEMORY_MODE:
+            launch_args.extend(
+                [
+                    "--renderer-process-limit=2",
+                    "--disable-features=Translate,OptimizationHints,MediaRouter",
+                ]
+            )
 
         self.browser_context = await self._launch_browser_context(launch_args, env)
 

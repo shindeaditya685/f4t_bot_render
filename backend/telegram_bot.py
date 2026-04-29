@@ -60,6 +60,8 @@ class TelegramControlBot:
         self._offset = 0
         self._stop_event = asyncio.Event()
         self._session: aiohttp.ClientSession | None = None
+        self.last_error = ""
+        self.username = ""
 
     async def run(self) -> None:
         logger.info("Telegram bot polling started")
@@ -67,17 +69,20 @@ class TelegramControlBot:
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             self._session = session
+            await self._prepare_polling()
             await self._send_startup_message()
 
             while not self._stop_event.is_set():
                 try:
                     updates = await self._get_updates()
+                    self.last_error = ""
                     for update in updates:
                         self._offset = max(self._offset, update["update_id"] + 1)
                         await self._handle_update(update)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    self.last_error = str(exc)[:500]
                     logger.warning("Telegram polling error: %s", exc)
                     await asyncio.sleep(5)
 
@@ -101,6 +106,36 @@ class TelegramControlBot:
             if not payload.get("ok"):
                 raise RuntimeError(payload)
             return payload.get("result", [])
+
+    async def _call_api(self, method: str, **params: Any) -> dict[str, Any]:
+        assert self._session is not None
+        async with self._session.post(
+            f"{self.api_base}/{method}",
+            json=params or None,
+        ) as response:
+            try:
+                payload = await response.json()
+            except Exception:
+                payload = {"ok": False, "description": await response.text()}
+
+            if not payload.get("ok"):
+                raise RuntimeError(
+                    f"{method} failed: {payload.get('description', payload)}"
+                )
+
+            return payload
+
+    async def _prepare_polling(self) -> None:
+        me = await self._call_api("getMe")
+        result = me.get("result") or {}
+        self.username = result.get("username", "")
+        logger.info(
+            "Telegram bot connected as @%s",
+            self.username or result.get("first_name", "unknown"),
+        )
+
+        # Long polling fails if a webhook is still configured for this token.
+        await self._call_api("deleteWebhook", drop_pending_updates=False)
 
     async def _send_message(
         self,

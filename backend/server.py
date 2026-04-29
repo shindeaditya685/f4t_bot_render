@@ -806,10 +806,19 @@ app.add_middleware(
 
 @app.get("/healthz", include_in_schema=False)
 async def healthcheck():
+    telegram_status = {
+        "enabled": telegram_control_bot is not None,
+        "running": telegram_task is not None and not telegram_task.done(),
+    }
+    if telegram_control_bot is not None:
+        telegram_status["username"] = telegram_control_bot.username
+        telegram_status["last_error"] = telegram_control_bot.last_error
+
     return {
         "status": "ok",
         "store": store_mode,
         "frontend_built": FRONTEND_INDEX_FILE.exists(),
+        "telegram": telegram_status,
     }
 
 
